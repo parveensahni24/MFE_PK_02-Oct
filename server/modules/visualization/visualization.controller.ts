@@ -33,14 +33,44 @@ export async function getVisualizationData(req: Request, res: Response) {
   const streamDistribution: Record<string, number> = {};
 
   for (const r of records) {
-    if (r['Final Selling Price (USD)']) totalSellingUSD += Number(r['Final Selling Price (USD)']) || 0;
-    if (r['total quantity ordered m2']) totalOrderedM2 += Number(r['total quantity ordered m2']) || 0;
-    if (r['produced qty']) totalProduced += Number(r['produced qty']) || 0;
+    const price = Number(r['Final Selling Price (USD)']) || Number(r['Selling Price (USD)']) || 0;
+    totalSellingUSD += price;
 
-    const ds = r['Formwork Design Status - To Start ; Ongoing ; Completed (Dropdown)'] || 'Unassigned';
-    designStatusCounts[ds] = (designStatusCounts[ds] || 0) + 1;
+    const ordered =
+      Number(r['Total Quantity Ordered m2']) ||
+      Number(r['Total Quantity Ordered (m2)']) ||
+      Number(r['Total Quantity Ordered']) ||
+      Number(r['total quantity ordered m2']) ||
+      0;
+    totalOrderedM2 += ordered;
 
-    const stream = r['Stream'] || 'Unassigned';
+    const produced =
+      Number(r['Total Produced Quantity']) ||
+      Number(r['Total Produced']) ||
+      Number(r['produced qty']) ||
+      0;
+    totalProduced += produced;
+
+    const rawDs =
+      r['Formwork Design Status'] ||
+      r['design status'] ||
+      r['Formwork Design Status - To Start ; Ongoing ; Completed (Dropdown)'] ||
+      'Unassigned';
+    const ds = String(rawDs).trim();
+    const normalizedDs =
+      ds.toLowerCase() === 'ongoing'
+        ? 'Ongoing'
+        : ds.toLowerCase() === 'to start'
+        ? 'To Start'
+        : ds.toLowerCase() === 'completed'
+        ? 'Completed'
+        : ds;
+    designStatusCounts[normalizedDs] = (designStatusCounts[normalizedDs] || 0) + 1;
+
+    const rawStream = r['Stream'] || '1';
+    const stream = String(rawStream).trim().startsWith('Stream')
+      ? String(rawStream).trim()
+      : `Stream ${String(rawStream).trim()}`;
     streamDistribution[stream] = (streamDistribution[stream] || 0) + 1;
   }
 

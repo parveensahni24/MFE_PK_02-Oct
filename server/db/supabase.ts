@@ -293,3 +293,202 @@ export async function saveMr11RunToDatabase(runData: {
     await pool.end();
   }
 }
+
+export interface DatabaseUser {
+  id: string;
+  email: string;
+  fullName: string;
+  passwordHash: string;
+  status: string;
+  isActive: boolean;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+  roles: Array<{
+    id: string;
+    roleId: string;
+    roleCode: string;
+    roleName: string;
+  }>;
+}
+
+/**
+ * Fetch all users along with their roles directly from Supabase.
+ */
+export async function getUsersFromDatabase(): Promise<DatabaseUser[]> {
+  const pool = createPgPool();
+  try {
+    const res = await pool.query(`
+      SELECT 
+        u.id, 
+        u.email, 
+        u."fullName", 
+        u."passwordHash", 
+        u.status, 
+        u."isActive", 
+        u."createdAt", 
+        u."updatedAt",
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', ur.id, 
+              'roleId', ur."roleId", 
+              'roleCode', r.code, 
+              'roleName', r.name
+            )
+          ) FILTER (WHERE ur.id IS NOT NULL), 
+          '[]'
+        ) as roles
+      FROM "User" u
+      LEFT JOIN "UserRole" ur ON u.id = ur."userId"
+      LEFT JOIN "Role" r ON ur."roleId" = r.id
+      GROUP BY u.id
+      ORDER BY u."createdAt" ASC;
+    `);
+
+    return res.rows;
+  } finally {
+    await pool.end();
+  }
+}
+
+/**
+ * Synchronize all users and their role assignments from Supabase into local Prisma memory.
+ */
+export async function syncUsersFromDatabase(prismaClient: any): Promise<void> {
+  try {
+    const dbUsers = await getUsersFromDatabase();
+    for (const u of dbUsers) {
+      let localUser = await prismaClient.user.findUnique({ where: { id: u.id } });
+      if (!localUser) {
+        localUser = await prismaClient.user.findFirst({ where: { email: u.email } });
+      }
+
+      if (!localUser) {
+        localUser = await prismaClient.user.create({
+          data: {
+            id: u.id,
+            email: u.email,
+            fullName: u.fullName,
+            passwordHash: u.passwordHash,
+            status: u.status || 'ACTIVE',
+            isActive: u.isActive !== false,
+            createdAt: new Date(u.createdAt),
+            updatedAt: new Date(u.updatedAt),
+          },
+        });
+      } else {
+        await prismaClient.user.update({
+          where: { id: localUser.id },
+          data: {
+            fullName: u.fullName,
+            passwordHash: u.passwordHash,
+            status: u.status || 'ACTIVE',
+            isActive: u.isActive !== false,
+          },
+        });
+      }
+
+      if (Array.isArray(u.roles)) {
+        for (const r of u.roles) {
+          if (!r.roleCode) continue;
+          let roleRec = await prismaClient.role.findFirst({ where: { code: r.roleCode } });
+          if (!roleRec) {
+            roleRec = await prismaClient.role.create({
+              data: { id: r.roleId || `role-${r.roleCode.toLowerCase()}`, code: r.roleCode, name: r.roleName || r.roleCode },
+            });
+          }
+          const existingUr = await prismaClient.userRole.findFirst({
+            where: { userId: localUser.id, roleId: roleRec.id },
+          });
+          if (!existingUr) {
+            await prismaClient.userRole.create({
+              data: {
+                id: r.id || `ur-${localUser.id}-${roleRec.id}`,
+                userId: localUser.id,
+                roleId: roleRec.id,
+              },
+            });
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('[SUPABASE USERS SYNC] Notice:', err?.message || err);
+  }
+}
+
+/**
+ * Persist a newly created user and roles directly to Supabase.
+ */
+export async function saveUserToDatabase(user: {
+  id: string;
+  email: string;
+  fullName: string;
+  passwordHash: string;
+  status: string;
+  isActive: boolean;
+  roleCodes: string[];
+}): Promise<void> {
+  const pool = createPgPool();
+  try {
+    await pool.query(
+      `INSERT INTO "User" ("id", "email", "fullName", "passwordHash", "status", "isActive", "createdAt", "updatedAt")
+       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+       ON CONFLICT ("id") DO UPDATE SET
+         "fullName" = EXCLUDED."fullName",
+         "passwordHash" = EXCLUDED."passwordHash",
+         "status" = EXCLUDED."status",
+         "isActive" = EXCLUDED."isActive",
+         "updatedAt" = NOW();`,
+      [user.id, user.email, user.fullName, user.status || 'ACTIVE', user.isActive !== false]
+    );
+
+    for (const code of user.roleCodes) {
+      const roleRes = await pool.query('SELECT id FROM "Role" WHERE code = $1 LIMIT 1;', [code]);
+      let roleId = roleRes.rows[0]?.id;
+      if (!roleId) {
+        roleId = `role-${code.toLowerCase()}`;
+        await pool.query(
+          'INSERT INTO "Role" ("id", "code", "name", "createdAt") VALUES ($1, $2, $3, NOW()) ON CONFLICT ("id") DO NOTHING;',
+          [roleId, code, code]
+        );
+      }
+      const urId = `ur-${user.id}-${roleId}`;
+      await pool.query(
+        'INSERT INTO "UserRole" ("id", "userId", "roleId", "createdAt") VALUES ($1, $2, $3, NOW()) ON CONFLICT ("id") DO NOTHING;',
+        [urId, user.id, roleId]
+      );
+    }
+  } finally {
+    await pool.end();
+  }
+}
+
+/**
+ * Update user roles in Supabase.
+ */
+export async function updateUserRolesInDatabase(userId: string, roleCodes: string[]): Promise<void> {
+  const pool = createPgPool();
+  try {
+    await pool.query('DELETE FROM "UserRole" WHERE "userId" = $1;', [userId]);
+
+    for (const code of roleCodes) {
+      const roleRes = await pool.query('SELECT id FROM "Role" WHERE code = $1 LIMIT 1;', [code]);
+      let roleId = roleRes.rows[0]?.id;
+      if (!roleId) {
+        roleId = `role-${code.toLowerCase()}`;
+        await pool.query(
+          'INSERT INTO "Role" ("id", "code", "name", "createdAt") VALUES ($1, $2, $3, NOW()) ON CONFLICT ("id") DO NOTHING;',
+          [roleId, code, code]
+        );
+      }
+      const urId = `ur-${userId}-${roleId}-${Date.now()}`;
+      await pool.query(
+        'INSERT INTO "UserRole" ("id", "userId", "roleId", "createdAt") VALUES ($1, $2, $3, NOW()) ON CONFLICT ("id") DO NOTHING;',
+        [urId, userId, roleId]
+      );
+    }
+  } finally {
+    await pool.end();
+  }
+}

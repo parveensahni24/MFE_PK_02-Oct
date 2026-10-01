@@ -21,9 +21,10 @@ export async function bootstrapSystem() {
     const admin = await prisma.user.findFirst({ where: { email: 'admin@mfeformwork.com' } });
     const adminId = admin?.id || 'user-admin-1';
 
-    // 1. On start, load active workbooks and the latest MR11 from the database into local Prisma/memory
-    const { getActiveDepartmentsFromDatabase, refreshLocalPrismaFromDatabase } = await import('./db/supabase');
+    // 1. On start, load active workbooks, latest MR11, and users from the database into local Prisma/memory
+    const { getActiveDepartmentsFromDatabase, refreshLocalPrismaFromDatabase, syncUsersFromDatabase } = await import('./db/supabase');
     await refreshLocalPrismaFromDatabase(prisma);
+    await syncUsersFromDatabase(prisma);
 
     // 2. Identify which departments have active workbooks in the database
     const dbDepts = await getActiveDepartmentsFromDatabase();

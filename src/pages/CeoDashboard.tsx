@@ -82,6 +82,8 @@ export const CeoDashboard: React.FC = () => {
   const extractedRows = useMemo(() => {
     if (!mr11Data) return [];
     if (Array.isArray(mr11Data)) return mr11Data;
+    if (Array.isArray(mr11Data.run?.records)) return mr11Data.run.records;
+    if (Array.isArray(mr11Data.records)) return mr11Data.records;
     if (Array.isArray(mr11Data.rows)) return mr11Data.rows;
     if (Array.isArray(mr11Data.parsedWorkbook)) return mr11Data.parsedWorkbook;
     if (Array.isArray(mr11Data.sheets?.[0]?.data)) return mr11Data.sheets[0].data;
@@ -97,34 +99,69 @@ export const CeoDashboard: React.FC = () => {
       productionSeries.length
     );
 
-    // Cumulative planned surface area from Planning Series
-    const totalPlannedArea = planningSeries.reduce(
+    // Cumulative planned surface area
+    let totalPlannedArea = planningSeries.reduce(
       (acc, item) => acc + (Number(item.totalProcessed) || Number(item.totalQuantity) || 0),
       0
     );
+    if (totalPlannedArea === 0 && extractedRows.length > 0) {
+      totalPlannedArea = extractedRows.reduce(
+        (acc: number, r: any) =>
+          acc +
+          (Number(r['Total Processed (m2)']) ||
+            Number(r['Total Processed']) ||
+            Number(r['processed qty']) ||
+            0),
+        0
+      );
+    }
 
-    // Cumulative produced surface area from Production Series
-    const totalProducedArea = productionSeries.reduce(
+    // Cumulative produced surface area
+    let totalProducedArea = productionSeries.reduce(
       (acc, item) => acc + (Number(item.totalProduced) || 0),
       0
     );
+    if (totalProducedArea === 0 && extractedRows.length > 0) {
+      totalProducedArea = extractedRows.reduce(
+        (acc: number, r: any) =>
+          acc +
+          (Number(r['Total Produced Quantity']) ||
+            Number(r['Total Produced']) ||
+            Number(r['produced qty']) ||
+            0),
+        0
+      );
+    }
 
     // Target contract volume
-    const totalTargetVolume = planningSeries.reduce(
+    let totalTargetVolume = planningSeries.reduce(
       (acc, item) => acc + (Number(item.totalQuantity) || 0),
       0
     );
+    if (totalTargetVolume === 0 && extractedRows.length > 0) {
+      totalTargetVolume = extractedRows.reduce(
+        (acc: number, r: any) =>
+          acc +
+          (Number(r['Total Quantity Ordered m2']) ||
+            Number(r['Total Quantity Ordered (m2)']) ||
+            Number(r['Total Quantity Ordered']) ||
+            0),
+        0
+      );
+    }
 
     const completionRate =
       totalPlannedArea > 0
         ? Math.min(100, Math.round((totalProducedArea / totalPlannedArea) * 100))
+        : totalTargetVolume > 0
+        ? Math.min(100, Math.round((totalProducedArea / totalTargetVolume) * 100))
         : 0;
 
     return {
       totalProjects,
-      totalTargetVolume,
-      totalPlannedArea,
-      totalProducedArea,
+      totalTargetVolume: Math.round(totalTargetVolume * 100) / 100,
+      totalPlannedArea: Math.round(totalPlannedArea * 100) / 100,
+      totalProducedArea: Math.round(totalProducedArea * 100) / 100,
       completionRate,
     };
   }, [extractedRows, planningSeries, productionSeries]);
@@ -134,24 +171,42 @@ export const CeoDashboard: React.FC = () => {
     // Map projects by contract / shortcode
     const map = new Map<string, { label: string; planned: number; produced: number }>();
 
-    planningSeries.forEach((p) => {
-      const key = p.projectShortname || p.projectNo || 'Project';
-      const existing = map.get(key) || { label: key, planned: 0, produced: 0 };
-      existing.planned += Number(p.totalProcessed) || 0;
-      map.set(key, existing);
-    });
+    if (planningSeries.length > 0 || productionSeries.length > 0) {
+      planningSeries.forEach((p) => {
+        const key = p.projectShortname || p.projectNo || 'Project';
+        const existing = map.get(key) || { label: key, planned: 0, produced: 0 };
+        existing.planned += Number(p.totalProcessed) || 0;
+        map.set(key, existing);
+      });
 
-    productionSeries.forEach((pr) => {
-      const key = pr.projectShortname || pr.projectNo || 'Project';
-      const existing = map.get(key) || { label: key, planned: 0, produced: 0 };
-      existing.produced += Number(pr.totalProduced) || 0;
-      map.set(key, existing);
-    });
+      productionSeries.forEach((pr) => {
+        const key = pr.projectShortname || pr.projectNo || 'Project';
+        const existing = map.get(key) || { label: key, planned: 0, produced: 0 };
+        existing.produced += Number(pr.totalProduced) || 0;
+        map.set(key, existing);
+      });
+    } else if (extractedRows.length > 0) {
+      extractedRows.forEach((r: any) => {
+        const key = r['Short Name'] || r['Project No'] || 'Project';
+        const existing = map.get(key) || { label: key, planned: 0, produced: 0 };
+        existing.planned +=
+          Number(r['Total Processed (m2)']) ||
+          Number(r['Total Processed']) ||
+          Number(r['Total Quantity Ordered m2']) ||
+          0;
+        existing.produced +=
+          Number(r['Total Produced Quantity']) ||
+          Number(r['Total Produced']) ||
+          Number(r['produced qty']) ||
+          0;
+        map.set(key, existing);
+      });
+    }
 
     const entries = Array.from(map.values()).slice(0, 8);
     const labels = entries.length > 0 ? entries.map((e) => e.label) : ['No Data'];
-    const planned = entries.length > 0 ? entries.map((e) => e.planned) : [0];
-    const produced = entries.length > 0 ? entries.map((e) => e.produced) : [0];
+    const planned = entries.length > 0 ? entries.map((e) => Math.round(e.planned)) : [0];
+    const produced = entries.length > 0 ? entries.map((e) => Math.round(e.produced)) : [0];
 
     return {
       labels,
@@ -170,16 +225,25 @@ export const CeoDashboard: React.FC = () => {
         },
       ],
     };
-  }, [planningSeries, productionSeries]);
+  }, [extractedRows, planningSeries, productionSeries]);
 
   // Chart 2: Factory Stream Allocation
   const streamData = useMemo(() => {
     const counts: Record<string, number> = { 'Stream 1': 0, 'Stream 2': 0, 'Stream 3': 0, 'Stream 4': 0 };
 
-    [...planningSeries, ...productionSeries].forEach((item) => {
-      const s = `Stream ${item.stream || 1}`;
-      if (counts[s] !== undefined) counts[s] += 1;
-    });
+    if (planningSeries.length > 0 || productionSeries.length > 0) {
+      [...planningSeries, ...productionSeries].forEach((item) => {
+        const s = `Stream ${item.stream || 1}`;
+        if (counts[s] !== undefined) counts[s] += 1;
+      });
+    } else if (extractedRows.length > 0) {
+      extractedRows.forEach((r: any) => {
+        const st = String(r['Stream'] || '1').trim();
+        const s = st.startsWith('Stream') ? st : `Stream ${st}`;
+        if (counts[s] !== undefined) counts[s] += 1;
+        else counts['Stream 1'] += 1;
+      });
+    }
 
     const values = Object.values(counts);
     const hasData = values.some((v) => v > 0);
@@ -195,7 +259,7 @@ export const CeoDashboard: React.FC = () => {
         },
       ],
     };
-  }, [planningSeries, productionSeries]);
+  }, [extractedRows, planningSeries, productionSeries]);
 
   return (
     <div className="flex flex-col h-full bg-[#F8FAFC] p-6 overflow-y-auto select-none">
